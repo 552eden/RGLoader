@@ -1,11 +1,125 @@
 #include "stdafx.h"
 
 #pragma region Kernel
+
+#define XEXLOAD_XEFU	"\\Device\\Harddisk0\\SystemPartition\\Compatibility\\xefu.xex"
+#define XEXLOAD_XBOX_XEX	"\\Device\\Harddisk0\\SystemPartition\\Compatibility\\xefu.xex"
+#define SET_PROT_ON		3
+#define SET_PROT_OFF	2
+
+HANDLE protoHandle = nullptr;
+
+CONST CHAR* GetLoadedImageName() { return ExLoadedImageName; }
+
+BOOL g_Protection_Mode = false; //is mem protect on or off? true=on
+BOOL g_triedProtoUnload = false; //did we try to unload proto already?
+
+DWORD __declspec(naked) HvxGetVersions(DWORD key, DWORD mode)
+{
+        __asm
+        {
+                li r0, 0x0
+                sc
+                blr
+        }
+}
+
+void ReloadXex(const char* xexPath, PHANDLE phandle) {
+    // Unload the currently loaded XEX
+    HANDLE hModule;
+	XexUnloadImage(*phandle);
+	//load the xex again
+    NTSTATUS status = XexLoadExecutable((PCHAR)xexPath, phandle, 0, 0);
+    if (!NT_SUCCESS(status)) {
+        RGLPrint("XEX Reload","Failed to load XEX: %s\n", xexPath);
+        return;
+    }
+	else
+		RGLPrint("XEX Reload","Successfully reloaded XEX: %s\n", xexPath);
+
+    
+	Sleep(500);
+	return;
+}
+
+
+BOOL shutDownProto()
+{
+	if(XexGetModuleHandle("Proto.xex", &protoHandle) == 0) //right now its for proto but can be changed to any stealth service. maybe we should look for the plugin name?
+	{
+		//printf("\n\nsuccsfully got proto handle\n\n");
+		((LDR_DATA_TABLE_ENTRY*)protoHandle)->LoadCount = 1;
+		XexUnloadImage(protoHandle);
+		g_triedProtoUnload = true;
+		RGLPrint("Proto Unload","Sent proto an unload request.\n");
+		return true;
+	}
+	else
+		//printf("\n\ndidnt get proto handle wtf\n\n");
+
+	RGLPrint("Proto Unload","Proto could not be unloaded.\n");
+	g_triedProtoUnload = true;
+	return false;
+}
+
+void setMemProtect(BOOL state)
+{
+	if(state)
+	{
+		if(HvxGetVersions(0x72627472, SET_PROT_ON) == 1)
+		{
+			RGLPrint("Memory Protection", "Memory protection is now ON!\n");
+		}
+		else
+			RGLPrint("Memory Protection", "Failed to set memory protection.\n");
+	}
+	else
+	{
+		if(HvxGetVersions(0x72627472, SET_PROT_OFF) == 1)
+		{
+			RGLPrint("Memory Protection", "Memory protection is now OFF!\n");
+		}
+		else
+			RGLPrint("Memory Protection", "Failed to set memory protection.\n");
+	}
+}
+
+
 NTSTATUS XexpLoadImageHook(LPCSTR xexName, DWORD typeInfo, DWORD ver, PHANDLE modHandle) {
 	NTSTATUS ret = RGLoader->Offsets->KERNEL->XexpLoadImage->Call<NTSTATUS>(xexName, typeInfo, ver, modHandle);
 
 	if(ret >= 0) {
-		if(stricmp(xexName, XEXLOAD_HUD) == 0) {
+
+
+
+		if(!g_Protection_Mode)
+		{
+			if(stricmp(xexName, XEXLOAD_XEFU) == 0){
+				RGLPrint("OGXbox Compatibility", "Detected Xbox emulator launch: %s\n", xexName);				
+				//turn on memory protection as we entered xbemu
+				Sleep(50);
+				if(!g_triedProtoUnload)
+				{
+					shutDownProto();
+					ReloadXex(XEXLOAD_XEFU, modHandle);
+					Sleep(500);
+					setMemProtect(true); // set mem protecc to on
+					g_Protection_Mode = true;
+
+				}
+				else if(g_triedProtoUnload && !g_Protection_Mode)
+				{
+					setMemProtect(true); // set mem protecc to on
+					g_Protection_Mode = true;
+				}
+				else
+					RGLPrint("OGXbox Compatibility", "Something went very wrong. aborting.\n");
+
+		
+			}
+		}
+
+		if(stricmp(xexName, XEXLOAD_HUD) == 0  && !g_Protection_Mode) { //if memory protection is on and we change hud, console will crash. fix not working in new RGLoader for some reason??
 			// printf("\n\n ***RGLoader->xex*** \n   -Re-applying patches to: %s!\n\n", xexName);
 
 			if(RGLoader->Config->Expansion->HudJumpToXShell) {
